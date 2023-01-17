@@ -19,7 +19,7 @@ from bot.helper.ext_utils.fs_utils import (check_storage_threshold,
 from bot.helper.mirror_utils.status_utils.qbit_download_status import QbDownloadStatus
 from bot.helper.mirror_utils.upload_utils.gdriveTools import GoogleDriveHelper
 from bot.helper.telegram_helper.message_utils import (deleteMessage,
-                                                      sendMarkup, sendMessage,
+                                                      sendMessage,
                                                       sendStatusMessage,
                                                       update_all_messages)
 
@@ -110,7 +110,7 @@ def add_qb_torrent(link, path, listener, ratio, seed_time):
             SBUTTONS = bt_selection_buttons(ext_hash)
             msg = f"<b>Name</b>: <code>{tor_info.name}</code>\n\nYour download paused. Choose files then press Done Selecting button to start downloading." \
                 "\n<b><i>Your download will not start automatically</i></b>"
-            sendMarkup(msg, listener.bot, listener.message, SBUTTONS)
+            sendMessage(msg, listener.bot, listener.message, SBUTTONS)
         else:
             sendStatusMessage(listener.message, listener.bot)
     except Exception as e:
@@ -136,14 +136,14 @@ def __remove_torrent(client, hash_):
         if hash_ in SIZE_CHECKED:
             SIZE_CHECKED.remove(hash_)
 
-def __onDownloadError(err, client, tor):
+def __onDownloadError(err, client, tor, button=None):
     LOGGER.info(f"Cancelling Download: {tor.name}")
     client.torrents_pause(torrent_hashes=tor.hash)
     sleep(0.3)
     download = getDownloadByGid(tor.hash[:12])
     try:
         listener = download.listener()
-        listener.onDownloadError(err)
+        listener.onDownloadError(err, button)
     except:
         pass
     __remove_torrent(client, tor.hash)
@@ -177,8 +177,8 @@ def __stop_duplicate(client, tor):
             if qbname:
                 qbmsg, button = GoogleDriveHelper().drive_list(qbname, True)
                 if qbmsg:
-                    __onDownloadError("File/Folder is already available in Drive.\n", client, tor)
-                    return sendMarkup("Here are the search results:", listener.bot, listener.message, button)
+                    __onDownloadError("File/Folder is already available in Drive.\nHere are the search results:\n", client, tor, button)
+                    return
     except:
         pass
 
@@ -187,31 +187,30 @@ def __size_checked(client, tor):
     try:
         listener = download.listener()
         size = tor.size
-        if STORAGE_THRESHOLD:= config_dict['STORAGE_THRESHOLD']:
+        limit_exceeded = ''
+        if not limit_exceeded and (STORAGE_THRESHOLD:= config_dict['STORAGE_THRESHOLD']):
+            limit = STORAGE_THRESHOLD * 1024**3
             arch = any([listener.isZip, listener.extract])
-            acpt = check_storage_threshold(size, arch)
+            acpt = check_storage_threshold(size, limit, arch)
             if not acpt:
-                msg = f'You must leave {STORAGE_THRESHOLD}GB free storage.'
-                msg += f'\nYour File/Folder size is {get_readable_file_size(size)}'
-                return __onDownloadError(msg, client, tor)
-        if TORRENT_LIMIT:= config_dict['TORRENT_LIMIT']:
+                limit_exceeded = f'You must leave {get_readable_file_size(limit)} free storage.'
+        if not limit_exceeded and (TORRENT_LIMIT:= config_dict['TORRENT_LIMIT']):
             limit = TORRENT_LIMIT * 1024**3
-            mssg = f'Torrent limit is {get_readable_file_size(limit)}'
             if size > limit:
-                fmsg = f"{mssg}.\nYour File/Folder size is {get_readable_file_size(size)}"
-                return __onDownloadError(fmsg, client, tor)
-        if LEECH_LIMIT:= config_dict['LEECH_LIMIT']:
-            if listener.isLeech:
-                limit = LEECH_LIMIT * 1024**3
-                mssg = f'Leech limit is {get_readable_file_size(limit)}'
-                if size > limit:
-                    fmsg = f"{mssg}.\nYour File/Folder size is {get_readable_file_size(size)}"
-                    return __onDownloadError(fmsg, client, tor)
+                limit_exceeded = f'Torrent limit is {get_readable_file_size(limit)}'
+        if not limit_exceeded and (LEECH_LIMIT:= config_dict['LEECH_LIMIT']) and listener.isLeech:
+            limit = LEECH_LIMIT * 1024**3
+            if size > limit:
+                limit_exceeded = f'Leech limit is {get_readable_file_size(limit)}'
+        if limit_exceeded:
+            fmsg = f"{limit_exceeded}.\nYour File/Folder size is {get_readable_file_size(size)}"
+            return __onDownloadError(fmsg, client, tor)
     except:
         pass
 
 @new_thread
 def __onDownloadComplete(client, tor):
+    sleep(2)
     download = getDownloadByGid(tor.hash[:12])
     try:
         listener = download.listener()

@@ -14,7 +14,7 @@ from dotenv import load_dotenv
 from pymongo import MongoClient
 from pyrogram import Client, enums
 from qbittorrentapi import Client as qbClient
-from telegram.ext import Updater as tgUpdater
+from telegram.ext import Updater as tgUpdater, Defaults
 
 main_loop = get_event_loop()
 
@@ -43,11 +43,15 @@ SHORTENERES = []
 SHORTENER_APIS = []
 BUTTON_NAMES = []
 BUTTON_URLS = []
-CATEGORY_INDEXS = []
+CATEGORY_INDEXES = []
 GLOBAL_EXTENSION_FILTER = ['.aria2']
 user_data = {}
 aria2_options = {}
 qbit_options = {}
+queued_dl = {}
+queued_up = {}
+non_queued_dl = set()
+non_queued_up = set()
 
 try:
     if bool(environ.get('_____REMOVE_THIS_LINE_____')):
@@ -58,6 +62,7 @@ except:
 
 download_dict_lock = Lock()
 status_reply_dict_lock = Lock()
+queue_dict_lock = Lock()
 # Key: update.effective_chat.id
 # Value: telegram.Message
 status_reply_dict = {}
@@ -70,6 +75,12 @@ rss_dict = {}
 # key: msg_id
 # value: [listener, extras, isNeedEngine, time_out]
 btn_listener = {}
+
+for file_ in ['pyrogram.session', 'pyrogram.session-journal',
+            'rss_session.session', 'rss_session.session-journal',
+            'buttons.txt', 'shorteners.txt', 'categories.txt']:
+    if path.exists(file_):
+        remove(file_)
 
 BOT_TOKEN = environ.get('BOT_TOKEN', '')
 if len(BOT_TOKEN) == 0:
@@ -209,6 +220,10 @@ RSS_COMMAND = environ.get('RSS_COMMAND', '')
 if len(RSS_COMMAND) == 0:
     RSS_COMMAND = ''
 
+LEECH_FILENAME_PREFIX = environ.get('LEECH_FILENAME_PREFIX', '')
+if len(LEECH_FILENAME_PREFIX) == 0:
+    LEECH_FILENAME_PREFIX = ''
+
 SEARCH_PLUGINS = environ.get('SEARCH_PLUGINS', '')
 if len(SEARCH_PLUGINS) == 0:
     SEARCH_PLUGINS = ''
@@ -243,13 +258,16 @@ SEARCH_LIMIT = 0 if len(SEARCH_LIMIT) == 0 else int(SEARCH_LIMIT)
 DUMP_CHAT = environ.get('DUMP_CHAT', '')
 DUMP_CHAT = '' if len(DUMP_CHAT) == 0 else int(DUMP_CHAT)
 
+LOG_CHAT = environ.get('LOG_CHAT', '')
+LOG_CHAT = '' if len(LOG_CHAT) == 0 else int(LOG_CHAT)
+
 STATUS_LIMIT = environ.get('STATUS_LIMIT', '')
 STATUS_LIMIT = '' if len(STATUS_LIMIT) == 0 else int(STATUS_LIMIT)
 
 USER_MAX_TASKS = environ.get('USER_MAX_TASKS', '')
 USER_MAX_TASKS = '' if len(USER_MAX_TASKS) == 0 else int(USER_MAX_TASKS)
 
-CMD_PERFIX = environ.get('CMD_PERFIX', '')
+CMD_SUFFIX = environ.get('CMD_SUFFIX', '')
 
 RSS_CHAT_ID = environ.get('RSS_CHAT_ID', '')
 RSS_CHAT_ID = '' if len(RSS_CHAT_ID) == 0 else int(RSS_CHAT_ID)
@@ -259,6 +277,15 @@ RSS_DELAY = 900 if len(RSS_DELAY) == 0 else int(RSS_DELAY)
 
 TORRENT_TIMEOUT = environ.get('TORRENT_TIMEOUT', '')
 TORRENT_TIMEOUT = '' if len(TORRENT_TIMEOUT) == 0 else int(TORRENT_TIMEOUT)
+
+QUEUE_ALL = environ.get('QUEUE_ALL', '')
+QUEUE_ALL = '' if len(QUEUE_ALL) == 0 else int(QUEUE_ALL)
+
+QUEUE_DOWNLOAD = environ.get('QUEUE_DOWNLOAD', '')
+QUEUE_DOWNLOAD = '' if len(QUEUE_DOWNLOAD) == 0 else int(QUEUE_DOWNLOAD)
+
+QUEUE_UPLOAD = environ.get('QUEUE_UPLOAD', '')
+QUEUE_UPLOAD = '' if len(QUEUE_UPLOAD) == 0 else int(QUEUE_UPLOAD)
 
 INCOMPLETE_TASK_NOTIFIER = environ.get('INCOMPLETE_TASK_NOTIFIER', '')
 INCOMPLETE_TASK_NOTIFIER = INCOMPLETE_TASK_NOTIFIER.lower() == 'true'
@@ -286,6 +313,9 @@ AS_DOCUMENT = AS_DOCUMENT.lower() == 'true'
 
 EQUAL_SPLITS = environ.get('EQUAL_SPLITS', '')
 EQUAL_SPLITS = EQUAL_SPLITS.lower() == 'true'
+
+MEDIA_GROUP = environ.get('MEDIA_GROUP', '')
+MEDIA_GROUP = MEDIA_GROUP.lower() == 'true'
 
 SERVER_PORT = environ.get('SERVER_PORT', '')
 if len(SERVER_PORT) == 0:
@@ -351,24 +381,27 @@ DISABLE_LEECH = DISABLE_LEECH.lower() == 'true'
 SET_COMMANDS = environ.get('SET_COMMANDS', '')
 SET_COMMANDS = SET_COMMANDS.lower() == 'true'
 
-ENABLE_DM = environ.get('ENABLE_DM', '')
-ENABLE_DM = ENABLE_DM.lower() == 'true'
+DM_MODE = environ.get('DM_MODE', '')
+DM_MODE = DM_MODE.lower() if DM_MODE.lower() in ['leech', 'mirror', 'all'] else ''
 
 DELETE_LINKS = environ.get('DELETE_LINKS', '')
 DELETE_LINKS = DELETE_LINKS.lower() == 'true'
 
-fsubid = environ.get('FSUB_IDS', '')
-FSUB_IDS = {int(_id.strip()) for _id in fsubid.split()} if len(fsubid) != 0 else set()
+FSUB_IDS = environ.get('FSUB_IDS', '')
+if len(FSUB_IDS) == 0:
+    FSUB_IDS = ''
 
 config_dict = {'AS_DOCUMENT': AS_DOCUMENT,
                 'AUTHORIZED_CHATS': AUTHORIZED_CHATS,
+                'FSUB_IDS': FSUB_IDS,
                 'AUTO_DELETE_MESSAGE_DURATION': AUTO_DELETE_MESSAGE_DURATION,
                 'BASE_URL': BASE_URL,
                 'BOT_TOKEN': BOT_TOKEN,
-                'CMD_PERFIX': CMD_PERFIX,
+                'CMD_SUFFIX': CMD_SUFFIX,
                 'DATABASE_URL': DATABASE_URL,
                 'DOWNLOAD_DIR': DOWNLOAD_DIR,
                 'DUMP_CHAT': DUMP_CHAT,
+                'LOG_CHAT': LOG_CHAT,
                 'EQUAL_SPLITS': EQUAL_SPLITS,
                 'EXTENSION_FILTER': EXTENSION_FILTER,
                 'GDRIVE_ID': GDRIVE_ID,
@@ -376,11 +409,16 @@ config_dict = {'AS_DOCUMENT': AS_DOCUMENT,
                 'INCOMPLETE_TASK_NOTIFIER': INCOMPLETE_TASK_NOTIFIER,
                 'INDEX_URL': INDEX_URL,
                 'IS_TEAM_DRIVE': IS_TEAM_DRIVE,
+                'LEECH_FILENAME_PREFIX': LEECH_FILENAME_PREFIX,
                 'LEECH_SPLIT_SIZE': LEECH_SPLIT_SIZE,
+                'MEDIA_GROUP': MEDIA_GROUP,
                 'MEGA_API_KEY': MEGA_API_KEY,
                 'MEGA_EMAIL_ID': MEGA_EMAIL_ID,
                 'MEGA_PASSWORD': MEGA_PASSWORD,
                 'OWNER_ID': OWNER_ID,
+                'QUEUE_ALL': QUEUE_ALL,
+                'QUEUE_DOWNLOAD': QUEUE_DOWNLOAD,
+                'QUEUE_UPLOAD': QUEUE_UPLOAD,
                 'RSS_USER_SESSION_STRING': RSS_USER_SESSION_STRING,
                 'RSS_CHAT_ID': RSS_CHAT_ID,
                 'RSS_COMMAND': RSS_COMMAND,
@@ -420,13 +458,16 @@ config_dict = {'AS_DOCUMENT': AS_DOCUMENT,
                 'DISABLE_DRIVE_LINK': DISABLE_DRIVE_LINK,
                 'SET_COMMANDS': SET_COMMANDS,
                 'DISABLE_LEECH': DISABLE_LEECH,
-                'ENABLE_DM': ENABLE_DM,
+                'DM_MODE': DM_MODE,
                 'DELETE_LINKS': DELETE_LINKS}
 
 if GDRIVE_ID:
     DRIVES_NAMES.append("Main")
     DRIVES_IDS.append(GDRIVE_ID)
     INDEX_URLS.append(INDEX_URL)
+    CATEGORY_NAMES.append("Root")
+    CATEGORY_IDS.append(GDRIVE_ID)
+    CATEGORY_INDEXES.append(INDEX_URL)
 
 if path.exists('list_drives.txt'):
     with open('list_drives.txt', 'r+') as f:
@@ -460,10 +501,6 @@ if path.exists('shorteners.txt'):
                 SHORTENERES.append(temp[0])
                 SHORTENER_APIS.append(temp[1])
 
-if GDRIVE_ID:
-    CATEGORY_NAMES.append("Root")
-    CATEGORY_IDS.append(GDRIVE_ID)
-    CATEGORY_INDEXS.append(INDEX_URL)
 
 if path.exists('categories.txt'):
     with open('categories.txt', 'r+') as f:
@@ -473,9 +510,9 @@ if path.exists('categories.txt'):
             CATEGORY_IDS.append(temp[1])
             CATEGORY_NAMES.append(temp[0].replace("_", " "))
             if len(temp) > 2:
-                CATEGORY_INDEXS.append(temp[2])
+                CATEGORY_INDEXES.append(temp[2])
             else:
-                CATEGORY_INDEXS.append('')
+                CATEGORY_INDEXES.append('')
 
 if BASE_URL:
     Popen(f"gunicorn web.wserver:app --bind 0.0.0.0:{SERVER_PORT}", shell=True)
@@ -508,14 +545,17 @@ def aria2c_init():
     try:
         info("Initializing Aria2c")
         link = "https://linuxmint.com/torrents/lmde-5-cinnamon-64bit.iso.torrent"
-        dire = DOWNLOAD_DIR.rstrip("/")
-        aria2.add_uris([link], {'dir': dire})
-        sleep(3)
-        downloads = aria2.get_downloads()
-        sleep(15)
-        for dl in downloads:
-            if dl:
-                dl.remove(True, True)
+        dl = aria2.add_uris([link], {'dir': DOWNLOAD_DIR.rstrip("/")})
+        atepmt = 0
+        while atepmt <= 3:
+            dl = dl.live
+            if dl.followed_by_ids:
+                dl = dl.api.get_download(dl.followed_by_ids[0])
+                dl = dl.live
+            atepmt+= 1
+            sleep(8)
+        if dl.remove(True, True):
+            info('Aria2c initializing finished')
     except Exception as e:
         error(f"Aria2c initializing error: {e}")
 
@@ -550,7 +590,8 @@ else:
 Thread(target=aria2c_init).start()
 sleep(1.5)
 
-updater = tgUpdater(token=BOT_TOKEN, request_kwargs={'read_timeout': 20, 'connect_timeout': 15})
+tgDefaults = Defaults(parse_mode='HTML', disable_web_page_preview=True, allow_sending_without_reply=True, run_async=True)
+updater = tgUpdater(token=BOT_TOKEN, defaults=tgDefaults, request_kwargs={'read_timeout': 20, 'connect_timeout': 15})
 bot = updater.bot
 dispatcher = updater.dispatcher
 job_queue = updater.job_queue

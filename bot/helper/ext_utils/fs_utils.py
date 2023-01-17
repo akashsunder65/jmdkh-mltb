@@ -1,4 +1,3 @@
-from json import loads as jsonloads
 from math import ceil
 from os import listdir, makedirs, mkdir
 from os import path as ospath
@@ -16,7 +15,7 @@ from magic import Magic
 from PIL import Image
 
 from bot import (DOWNLOAD_DIR, LOGGER, MAX_SPLIT_SIZE, app, aria2, config_dict,
-                 get_client)
+                 get_client, user_data)
 from bot.helper.ext_utils.exceptions import NotSupportedExtractionArchive
 from bot.helper.ext_utils.telegraph_helper import telegraph
 
@@ -53,11 +52,13 @@ def start_cleanup():
         rmtree(DOWNLOAD_DIR)
     except:
         pass
-    makedirs(DOWNLOAD_DIR)
+    makedirs(DOWNLOAD_DIR, exist_ok=True)
 
 def clean_all():
     aria2.remove_all(True)
-    get_client().torrents_delete(torrent_hashes="all")
+    qb = get_client()
+    qb.torrents_delete(torrent_hashes="all")
+    qb.auth_log_out()
     app.stop()
     telegraph.revoke_access_token()
     try:
@@ -97,8 +98,7 @@ def get_path_size(path: str):
     return total_size
 
 def get_base_name(orig_path: str):
-    ext = [ext for ext in ARCH_EXT if orig_path.lower().endswith(ext)]
-    if ext:
+    if ext := [ext for ext in ARCH_EXT if orig_path.lower().endswith(ext)]:
         ext = ext[0]
         return re_split(f'{ext}$', orig_path, maxsplit=1, flags=I)[0]
     else:
@@ -137,24 +137,26 @@ def split_file(path, size, file_, dirpath, split_size, listener, start_time=0, i
         dirpath = f"{dirpath}/splited_files_mltb"
         if not ospath.exists(dirpath):
             mkdir(dirpath)
-    parts = ceil(size/config_dict['LEECH_SPLIT_SIZE'])
-    if config_dict['EQUAL_SPLITS'] and not inLoop:
+    user_id = listener.message.from_user.id
+    user_dict = user_data.get(user_id, {})
+    leech_split_size = user_dict.get('split_size') or config_dict['LEECH_SPLIT_SIZE']
+    parts = ceil(size/leech_split_size)
+    if (user_dict.get('equal_splits') or config_dict['EQUAL_SPLITS']) and not inLoop:
         split_size = ceil(size/parts) + 1000
     if get_media_streams(path)[0]:
         duration = get_media_info(path)[0]
         base_name, extension = ospath.splitext(file_)
         split_size = split_size - 5000000
-        while i <= parts:
+        while i <= parts or start_time < duration - 4:
             parted_name = f"{str(base_name)}.part{str(i).zfill(3)}{str(extension)}"
             out_path = ospath.join(dirpath, parted_name)
+            cmd = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", str(start_time),
+                    "-i", path, "-fs", str(split_size), "-map_chapters", "-1", "-async", "1",
+                    "-strict", "-2","-c", "copy", out_path]
             if not noMap:
-                listener.suproc = Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", str(start_time),
-                                         "-i", path, "-fs", str(split_size), "-map", "0", "-map_chapters", "-1",
-                                         "-c", "copy", out_path])
-            else:
-                listener.suproc = Popen(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", str(start_time),
-                                          "-i", path, "-fs", str(split_size), "-map_chapters", "-1", "-c", "copy",
-                                          out_path])
+                cmd.insert(10, '-map')
+                cmd.insert(11, '0')
+            listener.suproc = Popen(cmd)
             listener.suproc.wait()
             if listener.suproc.returncode == -9:
                 return False
@@ -184,7 +186,7 @@ def split_file(path, size, file_, dirpath, split_size, listener, start_time=0, i
                 break
             elif duration == lpd:
                 if not noMap:
-                    LOGGER.warning(f"Retrying without map, -map 0 not working in all situations. Path: {path}")
+                    LOGGER.warning(f"Retrying without map. -map 0 not working in all situations. Path: {path}")
                     try:
                         osremove(out_path)
                     except:
@@ -193,7 +195,7 @@ def split_file(path, size, file_, dirpath, split_size, listener, start_time=0, i
                 else:
                     LOGGER.warning(f"This file has been splitted with default stream and audio, so you will only see one part with less size from orginal one because it doesn't have all streams and audios. This happens mostly with MKV videos. noMap={noMap}. Path: {path}")
                     break
-            elif lpd <= 4:
+            elif lpd <= 3:
                 osremove(out_path)
                 break
             start_time += lpd - 3
@@ -216,15 +218,14 @@ def get_media_info(path):
         LOGGER.error(f'{e}. Mostly file not found!')
         return 0, None, None
 
-    fields = jsonloads(result).get('format')
+    fields = eval(result).get('format')
     if fields is None:
         LOGGER.error(f"get_media_info: {result}")
         return 0, None, None
 
     duration = round(float(fields.get('duration', 0)))
 
-    fields = fields.get('tags')
-    if fields:
+    if fields := fields.get('tags'):
         artist = fields.get('artist')
         if artist is None:
             artist = fields.get('ARTIST')
@@ -241,26 +242,32 @@ def get_media_streams(path):
 
     is_video = False
     is_audio = False
+    is_image = False
 
     mime_type = get_mime_type(path)
     if mime_type.startswith('audio'):
         is_audio = True
-        return is_video, is_audio
+        return is_video, is_audio, is_image
 
-    if not mime_type.startswith('video'):
-        return is_video, is_audio
+    if mime_type.startswith('image'):
+        is_image = True
+        return is_video, is_audio, is_image
+
+    if path.endswith('.bin') or not mime_type.startswith('video') and not mime_type.endswith('octet-stream'):
+        return is_video, is_audio, is_image
 
     try:
         result = check_output(["ffprobe", "-hide_banner", "-loglevel", "error", "-print_format",
                                "json", "-show_streams", path]).decode('utf-8')
     except Exception as e:
-        LOGGER.error(f'{e}. Mostly file not found!')
-        return is_video, is_audio
+        if not mime_type.endswith('octet-stream'):
+            LOGGER.error(f'{e}. Mostly file not found!')
+        return is_video, is_audio, is_image
 
-    fields = jsonloads(result).get('streams')
+    fields = eval(result).get('streams')
     if fields is None:
         LOGGER.error(f"get_media_streams: {result}")
-        return is_video, is_audio
+        return is_video, is_audio, is_image
 
     for stream in fields:
         if stream.get('codec_type') == 'video':
@@ -268,19 +275,18 @@ def get_media_streams(path):
         elif stream.get('codec_type') == 'audio':
             is_audio = True
 
-    return is_video, is_audio
+    return is_video, is_audio, is_image
 
-def check_storage_threshold(size: int, arch=False, alloc=False):
-    STORAGE_THRESHOLD = config_dict['STORAGE_THRESHOLD']
+def check_storage_threshold(size, threshold, arch=False, alloc=False):
     if not alloc:
         if not arch:
-            if disk_usage(DOWNLOAD_DIR).free - size < STORAGE_THRESHOLD * 1024**3:
+            if disk_usage(DOWNLOAD_DIR).free - size < threshold:
                 return False
-        elif disk_usage(DOWNLOAD_DIR).free - (size * 2) < STORAGE_THRESHOLD * 1024**3:
+        elif disk_usage(DOWNLOAD_DIR).free - (size * 2) < threshold:
             return False
     elif not arch:
-        if disk_usage(DOWNLOAD_DIR).free < STORAGE_THRESHOLD * 1024**3:
+        if disk_usage(DOWNLOAD_DIR).free < threshold:
             return False
-    elif disk_usage(DOWNLOAD_DIR).free - size < STORAGE_THRESHOLD * 1024**3:
+    elif disk_usage(DOWNLOAD_DIR).free - size < threshold:
         return False
     return True

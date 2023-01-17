@@ -21,19 +21,19 @@ from bot.helper.telegram_helper.bot_commands import BotCommands
 from bot.helper.telegram_helper.filters import CustomFilters
 from bot.helper.telegram_helper.message_utils import (editMessage, sendLogFile, sendMessage)
 from bot.modules import (authorize, bot_settings, bt_select, cancel_mirror,
-                         category_select, clone, count, delete, drive_list,
+                         category_select, count, delete, drive_list,
                          eval, mirror_leech, mirror_status, rmdb, rss,
-                         save_message, search, shell, users_settings, ytdlp)
+                         save_message, search, shell, users_settings, ytdlp, anonymous)
 
-if path.exists('.git'):
-    last_commit = check_output(["git log -1 --date=short --pretty=format:'%cd <b>From</b> %cr'"], shell=True).decode()
-else:
-    last_commit = 'No UPSTREAM_REPO'
 
 def stats(update, context):
     total, used, free, disk = disk_usage('/')
     swap = swap_memory()
     memory = virtual_memory()
+    if path.exists('.git'):
+        last_commit = check_output(["git log -1 --date=short --pretty=format:'%cd <b>From</b> %cr'"], shell=True).decode()
+    else:
+        last_commit = 'No UPSTREAM_REPO'
     stats = f'<b>Commit Date</b>: {last_commit}\n\n'\
             f'<b>Bot Uptime</b>: {get_readable_time(time() - botStartTime)}\n'\
             f'<b>OS Uptime</b>: {get_readable_time(time() - boot_time())}\n\n'\
@@ -53,11 +53,11 @@ def stats(update, context):
     sendMessage(stats, context.bot, update.message)
 
 def start(update, context):
-    if config_dict['ENABLE_DM']:
-        start_string = 'Okay I will send you files or you link here\n' \
-                    "Don't block or stop me!"
+    if config_dict['DM_MODE']:
+        start_string = 'Bot Started.\n' \
+                    'Now I will send your files or links here.\n'
     else:
-        start_string = '🌹 Welcome To One Of A Modified Anas Mirror Bot\n' \
+        start_string = '🌹 Welcome To One Of A Modified Anasty Mirror Bot\n' \
                     'This bot can Mirror all your links To Google Drive!\n' \
                     '👨🏽‍💻 Powered By: @JMDKH_Team'
     sendMessage(start_string, context.bot, update.message)
@@ -90,7 +90,7 @@ def log(update, context):
     sendLogFile(context.bot, update.message)
 
 help_string = f'''
-NOTE: Try each command without any perfix to see more detalis.
+NOTE: Try each command without any argument to see more detalis.
 /{BotCommands.MirrorCommand[0]} or /{BotCommands.MirrorCommand[1]}: Start mirroring to Google Drive.
 /{BotCommands.ZipMirrorCommand[0]} or /{BotCommands.ZipMirrorCommand[1]}: Start mirroring and upload the file/folder compressed with zip extension.
 /{BotCommands.UnzipMirrorCommand[0]} or /{BotCommands.UnzipMirrorCommand[1]}: Start mirroring and upload the file/folder extracted from any archive extension.
@@ -115,7 +115,7 @@ NOTE: Try each command without any perfix to see more detalis.
 /{BotCommands.BtSelectCommand}: Select files from torrents by gid or reply.
 /{BotCommands.CategorySelect}: Change upload category for Google Drive.
 /{BotCommands.CancelMirror}: Cancel task by gid or reply.
-/{BotCommands.CancelAllCommand} : Cancel all tasks which added by you.
+/{BotCommands.CancelAllCommand[0]} : Cancel all tasks which added by you {BotCommands.CancelAllCommand[1]} to in bots.
 /{BotCommands.ListCommand} [query]: Search in Google Drive(s).
 /{BotCommands.SearchCommand} [query]: Search for torrents with API.
 /{BotCommands.StatusCommand[0]} or /{BotCommands.StatusCommand[1]}: Shows a status of all the downloads.
@@ -126,7 +126,8 @@ NOTE: Try each command without any perfix to see more detalis.
 /{BotCommands.UsersCommand}: show users settings (Only Owner & Sudo).
 /{BotCommands.AddSudoCommand}: Add sudo user (Only Owner).
 /{BotCommands.RmSudoCommand}: Remove sudo users (Only Owner).
-/{BotCommands.RestartCommand}: Restart and update the bot (Only Owner & Sudo).
+/{BotCommands.RestartCommand[0]}: Restart and update the bot (Only Owner & Sudo).
+/{BotCommands.RestartCommand[1]}: Restart all bots and update the bot (Only Owner & Sudo).
 /{BotCommands.LogCommand}: Get a log file of the bot. Handy for getting crash reports (Only Owner & Sudo).
 /{BotCommands.ShellCommand}: Run shell commands (Only Owner).
 /{BotCommands.EvalCommand}: Run Python Code Line | Lines (Only Owner).
@@ -137,6 +138,7 @@ NOTE: Try each command without any perfix to see more detalis.
 /{BotCommands.RssSubCommand[0]} or /{BotCommands.RssSubCommand[1]}: Subscribe new rss feed (Only Owner & Sudo).
 /{BotCommands.RssUnSubCommand[0]} or /{BotCommands.RssUnSubCommand[1]}: Unubscribe rss feed by title (Only Owner & Sudo).
 /{BotCommands.RssSettingsCommand[0]} or /{BotCommands.RssSettingsCommand[1]} [query]: Rss Settings (Only Owner & Sudo).
+/{BotCommands.RmdbCommand}: Remove task from the database.
 '''
 
 def bot_help(update, context):
@@ -163,25 +165,27 @@ def main():
                         if len(msg.encode()) > 4000:
                             if 'Restarted Successfully!' in msg and cid == chat_id:
                                 try:
-                                    bot.editMessageText(msg, chat_id, msg_id, parse_mode='HTML', disable_web_page_preview=True)
+                                    bot.editMessageText('Restarted Successfully!', chat_id, msg_id)
+                                    bot.sendMessage(chat_id, msg, reply_to_message_id=msg_id)
                                 except:
                                     pass
                                 remove(".restartmsg")
                             else:
                                 try:
-                                    bot.sendMessage(cid, msg, parse_mode='HTML', disable_web_page_preview=True)
+                                    bot.sendMessage(cid, msg)
                                 except Exception as e:
                                     LOGGER.error(e)
                             msg = ''
                 if 'Restarted Successfully!' in msg and cid == chat_id:
                     try:
-                        bot.editMessageText(msg, chat_id, msg_id, parse_mode='HTML', disable_web_page_preview=True)
+                        bot.editMessageText('Restarted Successfully!', chat_id, msg_id)
+                        bot.sendMessage(chat_id, msg, reply_to_message_id=msg_id)
                     except:
                         pass
                     remove(".restartmsg")
                 else:
                     try:
-                        bot.sendMessage(cid, msg, parse_mode='HTML', disable_web_page_preview=True)
+                        bot.sendMessage(cid, msg)
                     except Exception as e:
                         LOGGER.error(e)
     if path.isfile(".restartmsg"):
@@ -193,17 +197,17 @@ def main():
             pass
         remove(".restartmsg")
 
-    start_handler = CommandHandler(BotCommands.StartCommand, start, run_async=True)
+    start_handler = CommandHandler(BotCommands.StartCommand, start)
     log_handler = CommandHandler(BotCommands.LogCommand, log,
-                                        filters=CustomFilters.owner_filter | CustomFilters.sudo_user, run_async=True)
+                                        filters=CustomFilters.owner_filter | CustomFilters.sudo_user)
     restart_handler = CommandHandler(BotCommands.RestartCommand, restart,
-                                        filters=CustomFilters.owner_filter | CustomFilters.sudo_user, run_async=True)
+                                        filters=CustomFilters.owner_filter | CustomFilters.sudo_user)
     ping_handler = CommandHandler(BotCommands.PingCommand, ping,
-                               filters=CustomFilters.authorized_chat | CustomFilters.authorized_user, run_async=True)
+                               filters=CustomFilters.authorized_chat | CustomFilters.authorized_user)
     help_handler = CommandHandler(BotCommands.HelpCommand, bot_help,
-                               filters=CustomFilters.authorized_chat | CustomFilters.authorized_user, run_async=True)
+                               filters=CustomFilters.authorized_chat | CustomFilters.authorized_user)
     stats_handler = CommandHandler(BotCommands.StatsCommand, stats,
-                               filters=CustomFilters.authorized_chat | CustomFilters.authorized_user, run_async=True)
+                               filters=CustomFilters.authorized_chat | CustomFilters.authorized_user)
 
     dispatcher.add_handler(start_handler)
     dispatcher.add_handler(ping_handler)

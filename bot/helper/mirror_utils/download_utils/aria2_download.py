@@ -12,7 +12,7 @@ from bot.helper.ext_utils.fs_utils import (check_storage_threshold,
 from bot.helper.mirror_utils.status_utils.aria_download_status import AriaDownloadStatus
 from bot.helper.mirror_utils.upload_utils.gdriveTools import GoogleDriveHelper
 from bot.helper.telegram_helper.message_utils import (deleteMessage,
-                                                      sendMarkup, sendMessage,
+                                                      sendMessage,
                                                       sendStatusMessage,
                                                       update_all_messages)
 
@@ -58,50 +58,54 @@ def __onDownloadStarted(api, gid):
                     if sname:
                         smsg, button = GoogleDriveHelper().drive_list(sname, True)
                         if smsg:
-                            listener.onDownloadError('File/Folder already available in Drive.\n')
+                            listener.onDownloadError('File/Folder already available in Drive.\nHere are the search results:\n', button)
                             api.remove([download], force=True, files=True, clean=True)
-                            return sendMarkup("Here are the search results:", listener.bot, listener.message, button)
-        sleep(1)
-        dl = getDownloadByGid(gid)
-        if dl and hasattr(dl, 'listener'):
-            listener = dl.listener()
-        else:
-            return
-        download = api.get_download(gid)
-        size = download.total_length
-        if STORAGE_THRESHOLD:= config_dict['STORAGE_THRESHOLD']:
-            arch = any([listener.isZip, listener.extract])
-            acpt = check_storage_threshold(size, arch, True)
-            if not acpt:
-                msg = f'You must leave {STORAGE_THRESHOLD}GB free storage.'
-                msg += f'\nYour File/Folder size is {get_readable_file_size(size)}'
-                listener.onDownloadError(msg)
+                            return
+        if any([(DIRECT_LIMIT:= config_dict['DIRECT_LIMIT']),
+                (TORRENT_LIMIT:= config_dict['TORRENT_LIMIT']),
+                (LEECH_LIMIT:= config_dict['LEECH_LIMIT']),
+                (STORAGE_THRESHOLD:= config_dict['STORAGE_THRESHOLD'])]):
+            sleep(1)
+            dl = getDownloadByGid(gid)
+            if dl and hasattr(dl, 'listener'):
+                listener = dl.listener()
+            else:
+                return
+            download = api.get_download(gid)
+            download = download.live
+            if download.total_length == 0:
+                start_time = time()
+                while time() - start_time <= 15:
+                    download = api.get_download(gid)
+                    download = download.live
+                    if download.followed_by_ids:
+                        download = api.get_download(download.followed_by_ids[0])
+                    if download.total_length > 0:
+                        break
+            size = download.total_length
+            limit_exceeded = ''
+            if not limit_exceeded and STORAGE_THRESHOLD:
+                limit = STORAGE_THRESHOLD * 1024**3
+                arch = any([listener.isZip, listener.extract])
+                acpt = check_storage_threshold(size, limit, arch, True)
+                if not acpt:
+                    limit_exceeded = f'You must leave {get_readable_file_size(limit)} free storage.'
+            if not limit_exceeded and DIRECT_LIMIT and not download.is_torrent:
+                limit = DIRECT_LIMIT * 1024**3
+                if size > limit:
+                    limit_exceeded = f'Direct limit is {get_readable_file_size(limit)}'
+            if not limit_exceeded and TORRENT_LIMIT and download.is_torrent:
+                limit = TORRENT_LIMIT * 1024**3
+                if size > limit:
+                    limit_exceeded = f'Torrent limit is {get_readable_file_size(limit)}'
+            if not limit_exceeded and LEECH_LIMIT and listener.isLeech:
+                limit = LEECH_LIMIT * 1024**3
+                if size > limit:
+                    limit_exceeded = f'Leech limit is {get_readable_file_size(limit)}'
+            if limit_exceeded:
+                listener.onDownloadError(f'{limit_exceeded}.\nYour File/Folder size is {get_readable_file_size(size)}')
                 api.remove([download], force=True, files=True, clean=True)
                 return
-        if LEECH_LIMIT:= config_dict['LEECH_LIMIT']:
-            if listener.isLeech:
-                limit = LEECH_LIMIT * 1024**3
-                mssg = f'Leech limit is {get_readable_file_size(limit)}'
-                if size > limit:
-                    listener.onDownloadError(f'{mssg}.\nYour File/Folder size is {get_readable_file_size(size)}')
-                    api.remove([download], force=True, files=True, clean=True)
-                    return
-        if DIRECT_LIMIT:= config_dict['DIRECT_LIMIT']:
-            if not download.is_torrent:
-                limit = DIRECT_LIMIT * 1024**3
-                mssg = f'Direct limit is {get_readable_file_size(limit)}'
-                if size > limit:
-                    listener.onDownloadError(f'{mssg}.\nYour File/Folder size is {get_readable_file_size(size)}')
-                    api.remove([download], force=True, files=True, clean=True)
-                    return
-        if TORRENT_LIMIT:= config_dict['TORRENT_LIMIT']:
-            if download.is_torrent:
-                limit = TORRENT_LIMIT * 1024**3
-                mssg = f'Torrent limit is {get_readable_file_size(limit)}'
-                if size > limit:
-                    listener.onDownloadError(f'{mssg}.\nYour File/Folder size is {get_readable_file_size(size)}')
-                    api.remove([download], force=True, files=True, clean=True)
-                    return
     except Exception as e:
         LOGGER.error(f"{e} onDownloadStart: {gid} check duplicate didn't pass")
 
@@ -120,7 +124,7 @@ def __onDownloadComplete(api, gid):
                 api.client.force_pause(new_gid)
                 SBUTTONS = bt_selection_buttons(new_gid)
                 msg = f"<b>Name</b>: <code>{dl.name()}</code>\n\nYour download paused. Choose files then press Done Selecting button to start downloading."
-                sendMarkup(msg, listener.bot, listener.message, SBUTTONS)
+                sendMessage(msg, listener.bot, listener.message, SBUTTONS)
     elif download.is_torrent:
         if dl:= getDownloadByGid(gid):
             if hasattr(dl, 'listener') and dl.seeding:

@@ -1,33 +1,36 @@
 from re import split
 from threading import Thread
-from time import sleep, time
+from time import sleep
 
 from requests import request
 from telegram.ext import CallbackQueryHandler, CommandHandler
 
-from bot import (CATEGORY_NAMES, DATABASE_URL, DOWNLOAD_DIR, IS_USER_SESSION,
-                 btn_listener, config_dict, dispatcher, user_data)
+from bot import (DATABASE_URL, DOWNLOAD_DIR, IS_USER_SESSION,
+                 LOGGER, config_dict, dispatcher, user_data)
 from bot.helper.ext_utils.bot_utils import (check_user_tasks,
-                                            get_category_btns, check_buttons,
-                                            get_readable_file_size, is_url,
-                                            new_thread)
+                                            get_readable_file_size, is_url)
 from bot.helper.ext_utils.db_handler import DbManger
 from bot.helper.ext_utils.jmdkh_utils import extract_link
 from bot.helper.mirror_utils.download_utils.yt_dlp_download_helper import YoutubeDLHelper
 from bot.helper.telegram_helper.bot_commands import BotCommands
 from bot.helper.telegram_helper.button_build import ButtonMaker
 from bot.helper.telegram_helper.filters import CustomFilters
-from bot.helper.telegram_helper.message_utils import (chat_restrict,
+from bot.helper.telegram_helper.message_utils import (anno_checker,
+                                                      chat_restrict,
                                                       delete_links,
                                                       editMessage, forcesub,
-                                                      message_filter,
+                                                      isAdmin, message_filter,
                                                       sendDmMessage,
-                                                      sendMarkup, sendMessage)
+                                                      sendLogMessage,
+                                                      sendMessage)
 from bot.modules.listener import MirrorLeechListener
 
 listener_dict = {}
 
-def _ytdl(bot, message, isZip=False, isLeech=False):
+def _ytdl(bot, message, isZip=False, isLeech=False, sameDir={}):
+    if not isLeech and not config_dict['GDRIVE_ID']:
+        sendMessage('GDRIVE_ID not Provided!', bot, message)
+        return
     mssg = message.text
     msg_id = message.message_id
     qual = ''
@@ -35,17 +38,28 @@ def _ytdl(bot, message, isZip=False, isLeech=False):
     multi = 0
     index = 1
     link = ''
+    folder_name = ''
     c_index = 0
-    args = mssg.split(maxsplit=2)
+    raw_url = None
+    args = mssg.split(maxsplit=3)
     if len(args) > 1:
         for x in args:
             x = x.strip()
-            if x == 's':
+            if x in ['|', 'pswd:', 'opt:']:
+                break
+            elif x == 's':
                select = True
                index += 1
             elif x.strip().isdigit():
                 multi = int(x)
                 mi = index
+            elif x.startswith('m:'):
+                marg = x.split('m:', 1)
+                if len(marg) > 1:
+                    folder_name = f"/{marg[-1]}"
+                    if not sameDir:
+                        sameDir = set()
+                    sameDir.add(message.message_id)
         if multi == 0:
             args = mssg.split(maxsplit=index)
             if len(args) > index:
@@ -54,7 +68,24 @@ def _ytdl(bot, message, isZip=False, isLeech=False):
                     link = ''
                 else:
                     link = split(r"opt:|pswd:|\|", link)[0]
-                    link = link.strip() 
+                    link = link.strip()
+
+    def __run_multi():
+        if multi <= 1:
+            return
+        sleep(4)
+        nextmsg = type('nextmsg', (object, ), {'chat_id': message.chat_id,
+                                               'message_id': message.reply_to_message.message_id + 1})
+        ymsg = mssg.split(maxsplit=mi+1)
+        ymsg[mi] = f"{multi - 1}"
+        nextmsg = sendMessage(" ".join(ymsg), bot, nextmsg)
+        if len(folder_name) > 0:
+            sameDir.add(nextmsg.message_id)
+        nextmsg.from_user.id = message.from_user.id
+        sleep(4)
+        Thread(target=_ytdl, args=(bot, nextmsg, isZip, isLeech, sameDir)).start()
+
+    dl_path = f'{DOWNLOAD_DIR}{message.message_id}{folder_name}'
 
     name = mssg.split('|', maxsplit=1)
     if len(name) > 1:
@@ -102,6 +133,10 @@ This perfix should be always before |newname, pswd: and opt:
 <code>/{cmd}</code> 10(number of links)
 Number should be always before |newname, pswd: and opt:
 
+<b>Multi links within same upload directory only by replying to first link:</b>
+<code>/cmd</code> 10(number of links) m:folder_name
+Number and m:folder_name should be always before |newname, pswd: and opt:
+
 <b>Options Note:</b> Add `^` before integer, some values must be integer and some string.
 Like playlist_items:10 works with string, so no need to add `^` before the number but playlistend works only with integer so you must add `^` before the number like example above.
 You can add tuple and dict also. Use double quotes inside dict.
@@ -114,43 +149,148 @@ You can always add video quality from yt-dlp api options.
 Check all yt-dlp api options from this <a href='https://github.com/yt-dlp/yt-dlp/blob/master/yt_dlp/YoutubeDL.py#L178'>FILE</a>.
         """
         return sendMessage(help_msg.format_map({'cmd': BotCommands.YtdlCommand[0], 'fmg': '{"ffmpeg": ["-threads", "4"]}'}), bot, message)
-    if message_filter(bot, message, tag):
-        return
-    if DATABASE_URL and config_dict['STOP_DUPLICATE_TASKS']:
-        raw_url = extract_link(link)
-        exist = DbManger().check_download(raw_url)
-        if exist:
-            _msg = f'<b>Download is already added by {exist["tag"]}</b>\n\nCheck the download status in @{exist["botname"]}\n\n<b>Link</b>: <code>{exist["_id"]}</code>'
+    if message.from_user.id in [1087968824, 136817688]:
+        message.from_user.id = anno_checker(message)
+        if not message.from_user.id:
+            return
+    user_id = message.from_user.id
+    if not isAdmin(message):
+        if message_filter(bot, message, tag):
+            __run_multi()
+            return
+        if DATABASE_URL and config_dict['STOP_DUPLICATE_TASKS']:
+            raw_url = extract_link(link)
+            exist = DbManger().check_download(raw_url)
+            if exist:
+                _msg = f'<b>Download is already added by {exist["tag"]}</b>\n\nCheck the download status in @{exist["botname"]}\n\n<b>Link</b>: <code>{exist["_id"]}</code>'
+                delete_links(bot, message)
+                sendMessage(_msg, bot, message)
+                __run_multi()
+                return
+        if forcesub(bot, message, tag):
+            return
+        if (maxtask:= config_dict['USER_MAX_TASKS']) and check_user_tasks(message.from_user.id, maxtask):
+            return sendMessage(f"Your tasks limit exceeded for {maxtask} tasks", bot, message)
+        if isLeech and config_dict['DISABLE_LEECH']:
             delete_links(bot, message)
-            return sendMessage(_msg, bot, message)
-    if forcesub(bot, message, tag):
-        return
-    maxtask = config_dict['USER_MAX_TASKS']
-    if maxtask and not CustomFilters.owner_query(message.from_user.id) and check_user_tasks(message.from_user.id, maxtask):
-        return sendMessage(f"Tasks limit exceeded for {maxtask} tasks", bot, message)
-    listener = [bot, message, isZip, isLeech, pswd, tag, link]
-    extra = [name, opt, qual, select, c_index, time()]
-    if len(CATEGORY_NAMES) > 1 and not isLeech:
-        if checked:= check_buttons():
-            return sendMessage(checked, bot, message)
-        time_out = 30
-        btn_listener[msg_id] = [extra, listener, time_out]
-        chat_restrict(message)
-        text, btns = get_category_btns('ytdlp', time_out, msg_id, c_index)
-        engine = sendMarkup(text, bot, message, btns)
-        _auto_start_dl(engine, msg_id, time_out)
+            return sendMessage('Locked!', bot, message)
+    if (dmMode:=config_dict['DM_MODE']) and message.chat.type == message.chat.SUPERGROUP:
+        if isLeech and IS_USER_SESSION and not config_dict['DUMP_CHAT']:
+            return sendMessage('DM_MODE and User Session need DUMP_CHAT', bot, message)
+        dmMessage = sendDmMessage(bot, message, dmMode, isLeech)
+        if dmMessage == 'BotNotStarted':
+            return
     else:
-        chat_restrict(message)
-        start_ytdlp(extra, listener)
-    if multi > 1:
-        sleep(4)
-        nextmsg = type('nextmsg', (object,), {'chat_id': message.chat_id, 'message_id': message.reply_to_message.message_id + 1})
-        ymsg = mssg.split(maxsplit=mi+1)
-        ymsg[mi] = f"{multi - 1}"
-        nextmsg = sendMessage(" ".join(ymsg), bot, nextmsg)
-        nextmsg.from_user.id = message.from_user.id
-        sleep(4)
-        Thread(target=_ytdl, args=(bot, nextmsg, isZip, isLeech)).start()
+        dmMessage = None
+    logMessage = sendLogMessage(bot, message, link, tag)
+    chat_restrict(message)
+    listener = MirrorLeechListener(bot, message, isZip, isLeech=isLeech, pswd=pswd,
+                                tag=tag, sameDir=sameDir, raw_url=raw_url, c_index=c_index,
+                                dmMessage=dmMessage, logMessage=logMessage)
+    if 'mdisk.me' in link:
+        name, link = _mdisk(link, name)
+    ydl = YoutubeDLHelper(listener)
+    try:
+        result = ydl.extractMetaData(link, name, opt, True)
+    except Exception as e:
+        delete_links(bot, message)
+        msg = str(e).replace('<', ' ').replace('>', ' ')
+        sendMessage(f"{tag} {msg}", bot, message)
+        __run_multi()
+        return
+    if not select:
+        YTQ = config_dict['YT_DLP_QUALITY']
+        user_dict = user_data.get(user_id, {})
+        if 'format:' in opt:
+            opts = opt.split('|')
+            for f in opts:
+                if f.startswith('format:'):
+                    qual = f.split('format:', 1)[1]
+        elif user_dict.get('yt_ql'):
+            qual = user_dict['yt_ql']
+        elif 'yt_ql' not in user_dict and YTQ:
+            qual = YTQ
+    if qual:
+        playlist = 'entries' in result
+        LOGGER.info(f"Downloading with YT-DLP: {link} added by : {user_id}")
+        Thread(target=ydl.add_download, args=(link, dl_path, name, qual, playlist, opt)).start()
+    else:
+        buttons = ButtonMaker()
+        best_video = "bv*+ba/b"
+        best_audio = "ba/b"
+        formats_dict = {}
+        if 'entries' in result:
+            for i in ['144', '240', '360', '480', '720', '1080', '1440', '2160']:
+                video_format = f"bv*[height<=?{i}][ext=mp4]+ba[ext=m4a]/b[height<=?{i}]"
+                b_data = f"{i}|mp4"
+                formats_dict[b_data] = video_format
+                buttons.sbutton(f"{i}-mp4", f"qu {msg_id} {b_data} t")
+                video_format = f"bv*[height<=?{i}][ext=webm]+ba/b[height<=?{i}]"
+                b_data = f"{i}|webm"
+                formats_dict[b_data] = video_format
+                buttons.sbutton(f"{i}-webm", f"qu {msg_id} {b_data} t")
+            buttons.sbutton("MP3", f"qu {msg_id} mp3 t")
+            buttons.sbutton("Best Videos", f"qu {msg_id} {best_video} t")
+            buttons.sbutton("Best Audios", f"qu {msg_id} {best_audio} t")
+            buttons.sbutton("Cancel", f"qu {msg_id} cancel")
+            YTBUTTONS = buttons.build_menu(3)
+            bmsg = sendMessage('Choose Playlist Videos Quality:', bot, message, YTBUTTONS)
+        else:
+            formats = result.get('formats')
+            is_m4a = False
+            if formats is not None:
+                for frmt in formats:
+                    if frmt.get('tbr'):
+
+                        format_id = frmt['format_id']
+
+                        if frmt.get('filesize'):
+                            size = frmt['filesize']
+                        elif frmt.get('filesize_approx'):
+                            size = frmt['filesize_approx']
+                        else:
+                            size = 0
+
+                        if frmt.get('video_ext') == 'none' and frmt.get('acodec') != 'none':
+                            if frmt.get('audio_ext') == 'm4a':
+                                is_m4a = True
+                            b_name = f"{frmt['acodec']}-{frmt['ext']}"
+                            v_format = f"ba[format_id={format_id}]"
+                        elif frmt.get('height'):
+                            height = frmt['height']
+                            ext = frmt['ext']
+                            fps = frmt['fps'] if frmt.get('fps') else ''
+                            b_name = f"{height}p{fps}-{ext}"
+                            if ext == 'mp4':
+                                ba_ext = '[ext=m4a]' if is_m4a else ''
+                                v_format = f"bv*[format_id={format_id}]+ba{ba_ext}/b[height=?{height}]"
+                            else:
+                                v_format = f"bv*[format_id={format_id}]+ba/b[height=?{height}]"
+                        else:
+                            continue
+
+                        if b_name in formats_dict:
+                            formats_dict[b_name][str(frmt['tbr'])] = [size, v_format]
+                        else:
+                            subformat = {str(frmt['tbr']): [size, v_format]}
+                            formats_dict[b_name] = subformat
+
+                for b_name, d_dict in formats_dict.items():
+                    if len(d_dict) == 1:
+                        tbr, v_list = list(d_dict.items())[0]
+                        buttonName = f"{b_name} ({get_readable_file_size(v_list[0])})"
+                        buttons.sbutton(buttonName, f"qu {msg_id} {b_name}|{tbr}")
+                    else:
+                        buttons.sbutton(b_name, f"qu {msg_id} dict {b_name}")
+            buttons.sbutton("MP3", f"qu {msg_id} mp3")
+            buttons.sbutton("Best Video", f"qu {msg_id} {best_video}")
+            buttons.sbutton("Best Audio", f"qu {msg_id} {best_audio}")
+            buttons.sbutton("Cancel", f"qu {msg_id} cancel")
+            YTBUTTONS = buttons.build_menu(2)
+            bmsg = sendMessage('Choose Video quality\n\n<i>This Will Cancel Automatically in <u>2 Minutes</u></i>', bot, message, YTBUTTONS)
+        listener_dict[msg_id] = [listener, user_id, link, name, YTBUTTONS, opt, formats_dict, dl_path]
+        Thread(target=_auto_cancel, args=(bmsg, msg_id)).start()
+    __run_multi()
 
 def _qual_subbuttons(task_id, b_name, msg):
     buttons = ButtonMaker()
@@ -186,10 +326,9 @@ def select_format(update, context):
     msg = query.message
     data = data.split(" ")
     task_id = int(data[1])
-    try:
-        task_info = listener_dict[task_id]
-    except:
+    if task_id not in listener_dict:
         return editMessage("This is an old task", msg)
+    task_info = listener_dict[task_id]
     uid = task_info[1]
     if user_id != uid and not CustomFilters.owner_query(user_id):
         return query.answer(text="This task is not for you!", show_alert=True)
@@ -216,6 +355,7 @@ def select_format(update, context):
         name = task_info[3]
         opt = task_info[5]
         qual = data[2]
+        dl_path = task_info[7]
         if len(data) == 4:
             playlist = True
             if '|' in qual:
@@ -226,7 +366,8 @@ def select_format(update, context):
                 b_name, tbr = qual.split('|')
                 qual = task_info[6][b_name][tbr][1]
         ydl = YoutubeDLHelper(listener)
-        Thread(target=ydl.add_download, args=(link, f'{DOWNLOAD_DIR}{task_id}', name, qual, playlist, opt)).start()
+        LOGGER.info(f"Downloading with YT-DLP: {link} added by : {user_id}")
+        Thread(target=ydl.add_download, args=(link, dl_path, name, qual, playlist, opt)).start()
         query.message.delete()
     del listener_dict[task_id]
 
@@ -248,186 +389,11 @@ def _mdisk(link, name):
 
 def _auto_cancel(msg, task_id):
     sleep(120)
-    try:
-        del listener_dict[task_id]
-        editMessage('Timed out! Task has been cancelled.', msg)
-    except:
-        pass
+    if task_id not in listener_dict:
+        return
+    del listener_dict[task_id]
+    editMessage('Timed out! Task has been cancelled.', msg)
 
-def start_ytdlp(extra, ytdlp_listener):
-    bot = ytdlp_listener[0]
-    message = ytdlp_listener[1]
-    isZip = ytdlp_listener[2]
-    isLeech = ytdlp_listener[3]
-    pswd = ytdlp_listener[4]
-    tag = ytdlp_listener[5]
-    link = ytdlp_listener[6]
-    name = extra[0]
-    opt = extra[1]
-    qual = extra[2]
-    select = extra[3]
-    c_index = extra[4]
-    msg_id = message.message_id
-    user_id = message.from_user.id
-    if isLeech and config_dict['DISABLE_LEECH']:
-        delete_links(bot, message)
-        return sendMessage('Locked!', bot, message)
-    if config_dict['ENABLE_DM'] and message.chat.type != 'private':
-        if isLeech and IS_USER_SESSION and not config_dict['DUMP_CHAT']:
-            return sendMessage('ENABLE_DM and User Session need DUMP_CHAT', bot, message)
-        dmMessage = sendDmMessage(link, bot, message, disable_notification=True)
-        if not dmMessage:
-            return
-    else:
-        dmMessage = None
-    listener = MirrorLeechListener(bot, message, isZip, isLeech=isLeech, pswd=pswd, tag=tag, raw_url=link, c_index=c_index, dmMessage=dmMessage)
-    listener.mode = 'Leech' if isLeech else f'Drive {CATEGORY_NAMES[c_index]}'
-    if isZip:
-        listener.mode += ' as Zip'
-    if 'mdisk.me' in link:
-        name, link = _mdisk(link, name)
-    ydl = YoutubeDLHelper(listener)
-    try:
-        result = ydl.extractMetaData(link, name, opt, True)
-    except Exception as e:
-        delete_links(bot, message)
-        msg = str(e).replace('<', ' ').replace('>', ' ')
-        return sendMessage(f"{tag} {msg}", bot, message)
-    if not select:
-        user_dict = user_data.get(user_id, False)
-        if 'format:' in opt:
-            opts = opt.split('|')
-            for f in opts:
-                if f.startswith('format:'):
-                    qual = f.split('format:', 1)[1]
-        elif user_dict and user_dict.get('yt_ql', False):
-            qual = user_dict['yt_ql']
-        elif config_dict['YT_DLP_QUALITY']:
-            qual = config_dict['YT_DLP_QUALITY']
-    if qual:
-        playlist = 'entries' in result
-        Thread(target=ydl.add_download, args=(link, f'{DOWNLOAD_DIR}{msg_id}', name, qual, playlist, opt)).start()
-    else:
-        buttons = ButtonMaker()
-        best_video = "bv*+ba/b"
-        best_audio = "ba/b"
-        formats_dict = {}
-        if 'entries' in result:
-            for i in ['144', '240', '360', '480', '720', '1080', '1440', '2160']:
-                video_format = f"bv*[height<={i}][ext=mp4]+ba[ext=m4a]/b[height<={i}]"
-                b_data = f"{i}|mp4"
-                formats_dict[b_data] = video_format
-                buttons.sbutton(f"{i}-mp4", f"qu {msg_id} {b_data} t")
-                video_format = f"bv*[height<={i}][ext=webm]+ba/b[height<={i}]"
-                b_data = f"{i}|webm"
-                formats_dict[b_data] = video_format
-                buttons.sbutton(f"{i}-webm", f"qu {msg_id} {b_data} t")
-            buttons.sbutton("MP3", f"qu {msg_id} mp3 t")
-            buttons.sbutton("Best Videos", f"qu {msg_id} {best_video} t")
-            buttons.sbutton("Best Audios", f"qu {msg_id} {best_audio} t")
-            buttons.sbutton("Cancel", f"qu {msg_id} cancel")
-            YTBUTTONS = buttons.build_menu(3)
-            listener_dict[msg_id] = [listener, user_id, link, name, YTBUTTONS, opt, formats_dict]
-            bmsg = sendMarkup('Choose Playlist Videos Quality:', bot, message, YTBUTTONS)
-        else:
-            formats = result.get('formats')
-            if formats is not None:
-                for frmt in formats:
-                    if frmt.get('tbr'):
-
-                        format_id = frmt['format_id']
-
-                        if frmt.get('filesize'):
-                            size = frmt['filesize']
-                        elif frmt.get('filesize_approx'):
-                            size = frmt['filesize_approx']
-                        else:
-                            size = 0
-
-                        if frmt.get('height'):
-                            height = frmt['height']
-                            ext = frmt['ext']
-                            fps = frmt['fps'] if frmt.get('fps') else ''
-                            b_name = f"{height}p{fps}-{ext}"
-                            if ext == 'mp4':
-                                v_format = f"bv*[format_id={format_id}]+ba[ext=m4a]/b[height={height}]"
-                            else:
-                                v_format = f"bv*[format_id={format_id}]+ba/b[height={height}]"
-                        elif frmt.get('video_ext') == 'none' and frmt.get('acodec') != 'none':
-                            b_name = f"{frmt['acodec']}-{frmt['ext']}"
-                            v_format = f"ba[format_id={format_id}]"
-                        else:
-                            continue
-
-                        if b_name in formats_dict:
-                            formats_dict[b_name][str(frmt['tbr'])] = [size, v_format]
-                        else:
-                            subformat = {str(frmt['tbr']): [size, v_format]}
-                            formats_dict[b_name] = subformat
-
-                for b_name, d_dict in formats_dict.items():
-                    if len(d_dict) == 1:
-                        tbr, v_list = list(d_dict.items())[0]
-                        buttonName = f"{b_name} ({get_readable_file_size(v_list[0])})"
-                        buttons.sbutton(buttonName, f"qu {msg_id} {b_name}|{tbr}")
-                    else:
-                        buttons.sbutton(b_name, f"qu {msg_id} dict {b_name}")
-            buttons.sbutton("MP3", f"qu {msg_id} mp3")
-            buttons.sbutton("Best Video", f"qu {msg_id} {best_video}")
-            buttons.sbutton("Best Audio", f"qu {msg_id} {best_audio}")
-            buttons.sbutton("Cancel", f"qu {msg_id} cancel")
-            YTBUTTONS = buttons.build_menu(2)
-            listener_dict[msg_id] = [listener, user_id, link, name, YTBUTTONS, opt, formats_dict]
-            bmsg = sendMarkup('Choose Video quality\n\n<i>This Will Cancel Automatically in <u>2 Minutes</u></i>', bot, message, YTBUTTONS)
-
-        Thread(target=_auto_cancel, args=(bmsg, msg_id)).start()
-    delete_links(bot, message)
-
-@new_thread
-def _auto_start_dl(msg, msg_id, time_out):
-    sleep(time_out)
-    try:
-        info = btn_listener[msg_id]
-        del btn_listener[msg_id]
-        editMessage("Timed out! Task has been started.", msg)
-        start_ytdlp(info[0], info[1])
-    except:
-        pass
-
-@new_thread
-def ytdl_confirm(update, context):
-    query = update.callback_query
-    user_id = query.from_user.id
-    message = query.message
-    data = query.data
-    data = data.split()
-    msg_id = int(data[2])
-    try:
-        listnerInfo = btn_listener[msg_id]
-    except KeyError:
-        return editMessage('<b>Download has been cancelled or started already</b>', message)
-    extra = listnerInfo[0]
-    listener = listnerInfo[1]
-    if user_id != listener[1].from_user.id and not CustomFilters.owner_query(user_id):
-        return query.answer("You are not the owner of this download", show_alert=True)
-    elif data[1] == 'scat':
-        c_index = int(data[3])
-        if extra[4] == c_index:
-            return query.answer(f"{CATEGORY_NAMES[c_index]} is Selected Already", show_alert=True)
-        query.answer()
-        extra[4] = c_index
-    elif data[1] == "cancel":
-        query.answer()
-        del btn_listener[msg_id]
-        return editMessage('<b>Download has been cancelled</b>', message)
-    else:
-        query.answer()
-        message.delete()
-        del btn_listener[msg_id]
-        return start_ytdlp(extra, listener)
-    time_out = listnerInfo[2] - (time() - extra[5])
-    text, btns = get_category_btns('ytdlp', time_out, msg_id, extra[4])
-    editMessage(text, message, btns)
 
 def ytdl(update, context):
     _ytdl(context.bot, update.message)
@@ -443,18 +409,16 @@ def ytdlZipleech(update, context):
 
 
 ytdl_handler = CommandHandler(BotCommands.YtdlCommand, ytdl,
-                              filters=CustomFilters.authorized_chat | CustomFilters.authorized_user, run_async=True)
+                              filters=CustomFilters.authorized_chat | CustomFilters.authorized_user)
 ytdl_zip_handler = CommandHandler(BotCommands.YtdlZipCommand, ytdlZip,
-                              filters=CustomFilters.authorized_chat | CustomFilters.authorized_user, run_async=True)
+                              filters=CustomFilters.authorized_chat | CustomFilters.authorized_user)
 ytdl_leech_handler = CommandHandler(BotCommands.YtdlLeechCommand, ytdlleech,
-                              filters=CustomFilters.authorized_chat | CustomFilters.authorized_user, run_async=True)
+                              filters=CustomFilters.authorized_chat | CustomFilters.authorized_user)
 ytdl_zip_leech_handler = CommandHandler(BotCommands.YtdlZipLeechCommand, ytdlZipleech,
-                              filters=CustomFilters.authorized_chat | CustomFilters.authorized_user, run_async=True)
-quality_handler = CallbackQueryHandler(select_format, pattern="qu", run_async=True)
-ytdl_confirm_handler = CallbackQueryHandler(ytdl_confirm, pattern="ytdlp", run_async=True)
+                              filters=CustomFilters.authorized_chat | CustomFilters.authorized_user)
+quality_handler = CallbackQueryHandler(select_format, pattern="qu")
 dispatcher.add_handler(ytdl_handler)
 dispatcher.add_handler(ytdl_zip_handler)
 dispatcher.add_handler(ytdl_leech_handler)
 dispatcher.add_handler(ytdl_zip_leech_handler)
 dispatcher.add_handler(quality_handler)
-dispatcher.add_handler(ytdl_confirm_handler)
